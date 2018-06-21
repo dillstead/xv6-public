@@ -76,16 +76,54 @@ AS = $(TOOLPREFIX)gas
 LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
+# -fno-pic
+#   compile code that is not relocatable
+# -static
+#   prevent linking with shared libraries
+# -fno-builtin
+#   don't recognize built-in functions that don't begin with __builtin__ as a prefix
+# -MD
+#   output rule for make describing dependencies of source file
+# -ggdb
+#   produce debugging information used by GDB
+# -m32
+#   generate code for 32-bit ABI
+# -fno-omit-frame-pointer
+#   always keep frame pointer in register even for functions that don't need one
+#   (required because -O2 omits it)
+CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
 #CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -fvar-tracking -fvar-tracking-assignments -O0 -g -Wall -MD -gdwarf-2 -m32 -Werror -fno-omit-frame-pointer
+# -fno-stack-protector
+#   do not emit code to check for buffer overflows
+# -E
+#   stop after preprocessing stage
+# -x c
+#   C language
+# Adds -fno-stack-protector if available
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+
 ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
 # FreeBSD ld wants ``elf_i386_fbsd''
+# -m elf_i386
+#   link for i386
 LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
 
 xv6.img: bootblock kernel fs.img
+# 512 byte blocks
+# of=xv6.img
+#   write to file
+# count=10000
+#   copy N input blocks
 	dd if=/dev/zero of=xv6.img count=10000
+# if=bootblock
+#   read from file
+# conv=notrunc
+#   do not truncate output file
+# bootblock is first sector
 	dd if=bootblock of=xv6.img conv=notrunc
+# skip over bootblock
+# seek=1
+#   skip N obs-sized blocks at start of output
 	dd if=kernel of=xv6.img seek=1 conv=notrunc
 
 xv6memfs.img: bootblock kernelmemfs
@@ -95,10 +133,29 @@ xv6memfs.img: bootblock kernelmemfs
 
 bootblock: bootasm.S bootmain.c
 	$(CC) $(CFLAGS) -fno-pic -O -nostdinc -I. -c bootmain.c
+# -nostdinc
+#   do not search the standard system directory for header files
 	$(CC) $(CFLAGS) -fno-pic -nostdinc -I. -c bootasm.S
+# -N
+#   set the text and data sections to be readable and writable, do not page-align data segment
+#   and disable linking against shared libraries
+# -e start
+#   use entry as explicit symbol for beginning program execution, rather than default
+# BIOS loads boot loader into address 0x7C00
+# -Ttext 0x7C00
+#   locate the text section in the output file at absolute address 
 	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7C00 -o bootblock.o bootasm.o bootmain.o
+# -S
+#   display source code intermixed with assembly
 	$(OBJDUMP) -S bootblock.o > bootblock.asm
+# -S
+#   do not copy relocation and symbol information
+# -O binary
+#   output binary
+# -j .text
+#   copy only indicated sections to output file
 	$(OBJCOPY) -S -O binary -j .text bootblock.o bootblock
+# zeros out remainder of boot block and appends 0x55AA?
 	./sign.pl bootblock
 
 entryother: entryother.S
@@ -114,8 +171,17 @@ initcode: initcode.S
 	$(OBJDUMP) -S initcode.o > initcode.asm
 
 kernel: $(OBJS) entry.o entryother initcode kernel.ld
+# -T kernel.ld
+#   use linker script
+# -b binary
+#   binary format
+# initcode and entry other appended to the end of kernel
+# _binary_entryother_start and _binary_entryother_end
+# _binary_initcode_start and _binary_initcode_end are defined for use in kernel
 	$(LD) $(LDFLAGS) -T kernel.ld -o kernel entry.o $(OBJS) -b binary initcode entryother
 	$(OBJDUMP) -S kernel > kernel.asm
+# -t
+#   print symbol table entries for file
 	$(OBJDUMP) -t kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > kernel.sym
 
 # kernelmemfs is a copy of kernel that maintains the
@@ -144,8 +210,8 @@ _%: %.o $(ULIB)
 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $*.sym
 
 _forktest: forktest.o $(ULIB)
-	# forktest has less library code linked in - needs to be small
-	# in order to be able to max out the proc table.
+# forktest has less library code linked in - needs to be small
+# in order to be able to max out the proc table.
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o _forktest forktest.o ulib.o usys.o
 	$(OBJDUMP) -S _forktest > forktest.asm
 
@@ -206,16 +272,25 @@ bochs : fs.img xv6.img
 # try to generate a unique GDB port
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)
 # QEMU's gdb stub command line changed in 0.11
+# wait for gdb connection on tcp port
 QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 	then echo "-gdb tcp::$(GDBPORT)"; \
 	else echo "-s -p $(GDBPORT)"; fi)
 ifndef CPUS
 CPUS := 2
 endif
+# -drive file=fs.img,index=1,media=disk,format=raw
+#   define a new disk drive with fs.img raw disk image, indexed at 1
+#   in the list of connectors
+# -m 512
+#   set 512 megabytes of RAM
 QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
 
 qemu: fs.img xv6.img
-	$(QEMU) -serial mon:stdio $(QEMUOPTS)
+# -serial mon:stdio
+#   multiplex monitor to stdio
+#   the monitor is used to send commands to qemu
+	$(QEMU) -serial mon:stdio $(QEMUOPTS) &
 
 qemu-memfs: xv6memfs.img
 	$(QEMU) -drive file=xv6memfs.img,index=0,media=disk,format=raw -smp $(CPUS) -m 256
@@ -228,7 +303,9 @@ qemu-nox: fs.img xv6.img
 
 qemu-gdb: fs.img xv6.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
-	$(QEMU) -serial mon:stdio $(QEMUOPTS) -S $(QEMUGDB)
+# -S
+#   do not start CPU at startup, press 'c' in monitor
+	$(QEMU) -serial mon:stdio $(QEMUOPTS) -S $(QEMUGDB) &
 
 qemu-nox-gdb: fs.img xv6.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2

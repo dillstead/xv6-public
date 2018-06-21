@@ -769,7 +769,7 @@ concreate(void)
   char fa[40];
   struct {
     ushort inum;
-    char name[14];
+    char name[16];
   } de;
 
   printf(1, "concreate test\n");
@@ -1201,44 +1201,44 @@ bigfile(void)
 }
 
 void
-fourteen(void)
+sixteen(void)
 {
   int fd;
 
-  // DIRSIZ is 14.
-  printf(1, "fourteen test\n");
+  // DIRSIZ is 16.
+  printf(1, "sixteen test\n");
 
-  if(mkdir("12345678901234") != 0){
-    printf(1, "mkdir 12345678901234 failed\n");
+  if(mkdir("1234567890123456") != 0){
+    printf(1, "mkdir 1234567890123456 failed\n");
     exit();
   }
-  if(mkdir("12345678901234/123456789012345") != 0){
-    printf(1, "mkdir 12345678901234/123456789012345 failed\n");
+  if(mkdir("1234567890123456/12345678901234567") != 0){
+    printf(1, "mkdir 1234567890123456/12345678901234567 failed\n");
     exit();
   }
-  fd = open("123456789012345/123456789012345/123456789012345", O_CREATE);
+  fd = open("12345678901234567/12345678901234567/12345678901234567", O_CREATE);
   if(fd < 0){
-    printf(1, "create 123456789012345/123456789012345/123456789012345 failed\n");
+    printf(1, "create 12345678901234567/12345678901234567/12345678901234567 failed\n");
     exit();
   }
   close(fd);
-  fd = open("12345678901234/12345678901234/12345678901234", 0);
+  fd = open("1234567890123456/1234567890123456/1234567890123456", 0);
   if(fd < 0){
-    printf(1, "open 12345678901234/12345678901234/12345678901234 failed\n");
+    printf(1, "open 1234567890123456/1234567890123456/1234567890123456 failed\n");
     exit();
   }
   close(fd);
 
-  if(mkdir("12345678901234/12345678901234") == 0){
-    printf(1, "mkdir 12345678901234/12345678901234 succeeded!\n");
+  if(mkdir("1234567890123456/1234567890123456") == 0){
+    printf(1, "mkdir 1234567890123456/1234567890123456 succeeded!\n");
     exit();
   }
-  if(mkdir("123456789012345/12345678901234") == 0){
-    printf(1, "mkdir 12345678901234/123456789012345 succeeded!\n");
+  if(mkdir("12345678901234567/1234567890123456") == 0){
+    printf(1, "mkdir 12345678901234567/1234567890123456 succeeded!\n");
     exit();
   }
 
-  printf(1, "fourteen ok\n");
+  printf(1, "sixteen ok\n");
 }
 
 void
@@ -1785,7 +1785,7 @@ main(int argc, char *argv[])
   exitwait();
 
   rmdot();
-  fourteen();
+  sixteen();
   bigfile();
   subdir();
   linktest();

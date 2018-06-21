@@ -25,7 +25,7 @@
 static void itrunc(struct inode*);
 // there should be one superblock per disk device, but we run with
 // only one device
-struct superblock sb; 
+struct superblock sb;
 
 // Read the super block.
 void
@@ -454,7 +454,7 @@ int
 readi(struct inode *ip, char *dst, uint off, uint n)
 {
   uint tot, m;
-  struct buf *bp;
+  struct buf *bp; 
 
   if(ip->type == T_DEV){
     if(ip->major < 0 || ip->major >= NDEV || !devsw[ip->major].read)
@@ -467,11 +467,15 @@ readi(struct inode *ip, char *dst, uint off, uint n)
   if(off + n > ip->size)
     n = ip->size - off;
 
-  for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
-    bp = bread(ip->dev, bmap(ip, off/BSIZE));
-    m = min(n - tot, BSIZE - off%BSIZE);
-    memmove(dst, bp->data + off%BSIZE, m);
-    brelse(bp);
+  if(ip->type == T_DIR){
+    dirread(ip, dst, off, n);
+  } else {
+    for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
+      bp = bread(ip->dev, bmap(ip, off/BSIZE));
+      m = min(n - tot, BSIZE - off%BSIZE);
+      memmove(dst, bp->data + off%BSIZE, m);
+      brelse(bp);
+    }
   }
   return n;
 }
@@ -511,8 +515,13 @@ writei(struct inode *ip, char *src, uint off, uint n)
   return n;
 }
 
-//PAGEBREAK!
+//PAGEGREAK!
 // Directories
+struct btnode {
+  struct inode *dp;
+  struct buf *bp;
+  struct dirnode dnode;
+};
 
 int
 namecmp(const char *s, const char *t)
@@ -520,62 +529,630 @@ namecmp(const char *s, const char *t)
   return strncmp(s, t, DIRSIZ);
 }
 
-// Look for a directory entry in a directory.
-// If found, set *poff to byte offset of entry.
-struct inode*
-dirlookup(struct inode *dp, char *name, uint *poff)
+static void
+namecpy(char *s, const char *t)
 {
-  uint off, inum;
-  struct dirent de;
+  memmove(s, t, DIRSIZ);
+}
 
-  if(dp->type != T_DIR)
-    panic("dirlookup not DIR");
+struct {
+  struct spinlock lock;
+  struct btnode btnode[NBTNODE];
+} btcache;
 
-  for(off = 0; off < dp->size; off += sizeof(de)){
-    if(readi(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
-      panic("dirlookup read");
-    if(de.inum == 0)
-      continue;
-    if(namecmp(name, de.name) == 0){
-      // entry matches path element
-      if(poff)
-        *poff = off;
-      inum = de.inum;
-      return iget(dp->dev, inum);
+static ushort
+btcntchildren(struct btnode *btp)
+{
+  int i, nchildren;
+
+  nchildren = 0;
+  for(i = 0; i < btp->dnode.ndirs; i++) {
+    nchildren++;
+  }
+  if(!btp->dnode.leaf) {
+    for(i = 0; i <= btp->dnode.ndirs; i++) {
+      nchildren += btp->dnode.nchildren[i];
     }
   }
-
-  return 0;
+  return nchildren;
 }
+
+static void
+btrelse(struct btnode *btp)
+{
+  brelse(btp->bp);
+
+  acquire(&btcache.lock);
+  btp->bp = 0;
+  release(&btcache.lock);
+}
+
+static void
+btfree(struct btnode *btp)
+{
+  uint dev, blockno;
+
+  dev = btp->dp->dev;
+  blockno = btp->bp->blockno;
+  btrelse(btp);
+  bfree(dev, blockno);
+}
+
+static struct btnode*
+btget(void)
+{
+  struct btnode *btp;
+  int i;
+
+  acquire(&btcache.lock);
+  for(i = 0; i < NBTNODE; i++) {
+    if(btcache.btnode[i].bp == 0) {
+      btp = &btcache.btnode[i];
+      break;
+    }
+  }
+  release(&btcache.lock);
+  
+  if(i == NBTNODE) {
+    panic("btget: no btnodes");
+  }
+  return btp;
+  
+}
+
+static struct btnode*
+btload(struct inode *dp, uint addr)
+{
+  struct btnode *btp;
+
+  btp = btget();
+  btp->bp = bread(dp->dev, addr);
+  btp->dp = dp;
+  memmove(&btp->dnode, btp->bp->data, sizeof(btp->bp->data));
+
+  return btp;
+}
+
+static struct btnode*
+btalloc(struct inode *dp)
+{
+  struct btnode *btp;
+  uint addr;
+
+  addr = balloc(dp->dev);
+  btp = btload(dp, addr);
+  memset(&btp->dnode, 0, sizeof(btp->dnode));
+
+  return btp;
+}
+
+static void
+btwrite(struct btnode *btp)
+{
+  memmove(btp->bp->data, &btp->dnode, sizeof(btp->dnode));
+  bwrite(btp->bp);
+}
+
+static void
+btwrelse(struct btnode *btp)
+{
+  btwrite(btp);
+  btrelse(btp);
+}
+
+static void
+direntinsert(struct btnode *btp, int idx, struct dirent *dir, int cidx, uint cb,
+             ushort nchildren)
+{
+  int i;
+  
+  for(i = btp->dnode.ndirs - 1; i >= idx; i--) {
+    btp->dnode.dirs[i + 1] = btp->dnode.dirs[i];
+  }
+  btp->dnode.dirs[idx] = *dir;
+  if(cidx >= 0) {
+    for(i = btp->dnode.ndirs; i >= cidx; i--) {
+      btp->dnode.children[i + 1] = btp->dnode.children[i];
+      btp->dnode.nchildren[i + 1] = btp->dnode.nchildren[i];
+    }
+    btp->dnode.children[cidx] = cb;
+    btp->dnode.nchildren[cidx] = nchildren;
+  }
+  (btp->dnode.ndirs)++;
+}
+
+static void
+direntdelete(struct btnode *btp, int idx, int cidx)
+{
+  int i;
+  
+  for(i = idx; i < btp->dnode.ndirs - 1; i++) {
+    btp->dnode.dirs[i] = btp->dnode.dirs[i + 1];
+  }
+  if(cidx >= 0) {
+      for(i = cidx; i < btp->dnode.ndirs; i++) {
+        btp->dnode.children[i] = btp->dnode.children[i + 1];
+        btp->dnode.nchildren[i] = btp->dnode.nchildren[i + 1];
+      }
+  }
+  (btp->dnode.ndirs)--;
+}
+
+/*
+static 
+void btprint(struct btnode *btp, int lvl)
+{
+  int i, j;
+  struct btnode *btcp;
+
+  if(!btp->dnode.leaf) {
+    btcp = btload(btp->dp, btp->dnode.children[btp->dnode.ndirs]);
+    btprint(btcp, lvl + 1);
+  }
+  for(i = btp->dnode.ndirs - 1; i >= 0; i--) {
+    for (j = 0; j < lvl; j++) {
+      cprintf(" ");
+    }
+    if(i == 0 && !btp->dnode.leaf) {
+      cprintf("(%d)%s", btp->dnode.nchildren[0], btp->dnode.dirs[i].name);
+    } else {
+      cprintf("%s", btp->dnode.dirs[i].name);
+    }
+    if(!btp->dnode.leaf) {
+      cprintf("(%d)\n", btp->dnode.nchildren[i + 1]);
+      btcp = btload(btp->dp, btp->dnode.children[i]);
+      btprint(btcp, lvl + 1);
+    } else {
+      cprintf("\n");
+    }
+  }
+  btrelse(btp);
+}
+*/
+
+static struct inode*
+btlookup(struct btnode *btp, char *name)
+{
+  struct inode *ip;
+  struct btnode *btcp;
+  int i, c;
+
+  i = 0;
+  while(i < btp->dnode.ndirs && (c = namecmp(name, btp->dnode.dirs[i].name)) > 0) {
+    i++;
+  }
+  if(i < btp->dnode.ndirs && c == 0) {
+    ip = iget(btp->dp->dev, btp->dnode.dirs[i].inum);
+    btrelse(btp);
+    return ip;
+  }
+  if(btp->dnode.leaf) {
+    btrelse(btp);
+    return 0;
+  }
+  btcp = btload(btp->dp, btp->dnode.children[i]);
+  ip = btlookup(btcp, name);
+  btrelse(btp);
+  
+  return ip;
+}
+
+static struct btnode *
+btsplit(struct btnode *btpp, int idx, struct btnode *btcp)
+{
+  struct btnode *btncp;
+  int i;
+  
+  // number of children moved
+  ushort nchildren;
+
+  btncp = btalloc(btpp->dp);
+  btncp->dnode.leaf = btcp->dnode.leaf;
+  btncp->dnode.ndirs = BTDEGREE - 1;
+  // move BTDEGREE - 1 dirents and, if leaf, BTDEGREE children
+  nchildren = 0;
+  for(i = 0; i < BTDEGREE - 1; i++) {
+    nchildren++;
+    btncp->dnode.dirs[i] = btcp->dnode.dirs[i + BTDEGREE];
+  }
+  if(!btcp->dnode.leaf) {
+    for(i = 0; i < BTDEGREE; i++) {
+      nchildren += btcp->dnode.nchildren[i + BTDEGREE];
+      btncp->dnode.children[i] = btcp->dnode.children[i + BTDEGREE];
+      btncp->dnode.nchildren[i] = btcp->dnode.nchildren[i + BTDEGREE];
+    }
+  }
+  btcp->dnode.ndirs = BTDEGREE - 1;
+  // insert median dirent into parent
+  direntinsert(btpp, idx, &btcp->dnode.dirs[BTDEGREE - 1], idx + 1, btncp->bp->blockno, nchildren);
+  // adjust nchildren in parent, accounting for median dirent that was moved up to the parent
+  btpp->dnode.nchildren[idx] -= (nchildren + 1);
+  return btncp;
+}
+
+static void
+btinsert(struct btnode *btp, struct dirent *dir)
+{
+  struct btnode *btcp, *btncp;
+  int i;
+
+  i = btp->dnode.ndirs - 1;
+  while(i >= 0 && strncmp(dir->name, btp->dnode.dirs[i].name, DIRSIZ) < 0) {
+    i--;
+  }
+  if(btp->dnode.leaf) {
+    direntinsert(btp, i + 1, dir, -1, 0, 0);
+  } else {
+    // insert into appropriate leaf node rooted at this subtree
+    i++;
+    btcp = btload(btp->dp, btp->dnode.children[i]);
+    if(btcp->dnode.ndirs == 2 * BTDEGREE - 1) {
+      // split a full child into two smaller ones before descending
+      btncp = btsplit(btp, i, btcp);
+      if(strncmp(dir->name, btp->dnode.dirs[i].name, DIRSIZ) > 0) {
+        (btp->dnode.nchildren[i + 1])++;
+        btwrelse(btcp);
+        btinsert(btncp, dir);
+      } else {
+        (btp->dnode.nchildren[i])++;
+        btwrelse(btncp);
+        btinsert(btcp, dir);
+      }
+    } else {
+      (btp->dnode.nchildren[i])++;
+      btinsert(btcp, dir);
+    }
+  }
+  btwrelse(btp);
+}
+
+// TODO check naming convention
+static void
+btmerge(struct btnode *btp, int idx, struct btnode *btcp, struct btnode *btncp)
+{
+  int i;
+  // number of children moved
+  ushort nchildren;
+  
+  btcp->dnode.dirs[btcp->dnode.ndirs] = btp->dnode.dirs[idx];
+  (btcp->dnode.ndirs)++;
+
+  // move all of next child's dirents and, if internal node, children
+  nchildren = 0;
+  for(i = 0; i < btncp->dnode.ndirs; i++) {
+    nchildren++;
+    btcp->dnode.dirs[btcp->dnode.ndirs + i] = btncp->dnode.dirs[i];
+  }
+  if(!btcp->dnode.leaf) {
+    for(i = 0; i <= btncp->dnode.ndirs; i++) {
+      nchildren += btncp->dnode.nchildren[i];
+      btcp->dnode.children[btcp->dnode.ndirs + i] = btncp->dnode.children[i];
+      btcp->dnode.nchildren[btcp->dnode.ndirs + i] = btncp->dnode.nchildren[i];
+    }
+  }
+  btcp->dnode.ndirs += btncp->dnode.ndirs;
+  direntdelete(btp, idx, idx + 1);
+  // adjust nchildren in parent, accounting for the median dirent was moved down from the parent
+  btp->dnode.nchildren[idx] += (nchildren + 1);
+  // next child no longer needed and search will proceed from child
+  btfree(btncp);
+}
+
+static void
+btpexchange(struct btnode *btp, int idx, struct btnode *btcp, struct btnode *btpcp)
+{
+  // number of children moved
+  uint nchildren;
+  
+  nchildren = (btpcp->dnode.nchildren[btpcp->dnode.ndirs] + 1);
+  direntinsert(btcp, 0, &btp->dnode.dirs[idx], 0, btpcp->dnode.children[btpcp->dnode.ndirs], btpcp->dnode.nchildren[btpcp->dnode.ndirs]);
+  btp->dnode.dirs[idx] = btpcp->dnode.dirs[btpcp->dnode.ndirs - 1];
+  direntdelete(btpcp, btpcp->dnode.ndirs - 1, btpcp->dnode.ndirs);
+  // adjust nchildren in parent, accounting for the previous child's last dirent and its it's children that were just moved
+  btp->dnode.nchildren[idx] -= nchildren;
+  btp->dnode.nchildren[idx + 1] += nchildren;
+  btwrelse(btpcp);
+}
+
+static void
+btnexchange(struct btnode *btp, int idx, struct btnode *btcp, struct btnode *btncp)
+{
+  // number of children moved
+  uint nchildren;
+  
+  nchildren = (btncp->dnode.nchildren[0] + 1);
+  direntinsert(btcp, btcp->dnode.ndirs, &btp->dnode.dirs[idx], btcp->dnode.ndirs + 1, btncp->dnode.children[0], btncp->dnode.nchildren[0]);
+  btp->dnode.dirs[idx] = btncp->dnode.dirs[0];
+  direntdelete(btncp, 0, 0);
+  // adjust nchildren in parent, accounting for the next child's first dirent and its children that were just moved
+  btp->dnode.nchildren[idx] += nchildren;
+  btp->dnode.nchildren[idx + 1] -= nchildren;
+  btwrelse(btncp);
+}
+
+static void
+btdelete(struct btnode *btp, char *name, struct dirent *replace, int release)
+{
+  struct btnode *btcp, *btncp, *btpcp;
+  int i, c, exchanged = 0;
+
+  i = btp->dnode.ndirs - 1;
+  while(i >= 0 && (c = strncmp(name, btp->dnode.dirs[i].name, DIRSIZ)) < 0) {
+    i--;
+  }
+  if(c == 0) {
+    // dirent was found
+    if(btp->dnode.leaf) {
+      direntdelete(btp, i, -1);
+    } else {
+      btcp = btload(btp->dp, btp->dnode.children[i]);
+      if(btcp->dnode.ndirs >= BTDEGREE) {
+        (btp->dnode.nchildren[i])--;
+        btdelete(btcp, name, &btp->dnode.dirs[i], 1);
+      }
+      else {
+        btncp = btload(btp->dp, btp->dnode.children[i + 1]);
+        if(btncp->dnode.ndirs >= BTDEGREE) {
+          btrelse(btcp);
+          (btp->dnode.nchildren[i + 1])--;
+          btdelete(btncp, name, &btp->dnode.dirs[i], 1);
+        } else {
+          btmerge(btp, i, btcp, btncp);
+          (btp->dnode.nchildren[i])--;
+          btdelete(btcp, name, 0, 1);
+        }
+      }
+    }
+  } else {
+    // dirent was not found
+    if(btp->dnode.leaf) {
+      if(replace != 0) {
+        if(i < 0) {
+          *replace = btp->dnode.dirs[0];
+          direntdelete(btp, 0, -1);
+        } else {
+          *replace = btp->dnode.dirs[i];
+          direntdelete(btp, i, -1);
+        }
+      }
+    } else {
+      i++;
+      btcp = btload(btp->dp, btp->dnode.children[i]);
+      if(btcp->dnode.ndirs < BTDEGREE) {
+        if(i > 0) {
+          btpcp = btload(btp->dp, btp->dnode.children[i - 1]);
+          if(btpcp->dnode.ndirs >= BTDEGREE) {
+            btpexchange(btp, i - 1, btcp, btpcp);
+            (btp->dnode.nchildren[i])--;
+            btdelete(btcp, name, replace, 1);
+            exchanged = 1;
+          }
+        }
+        if(!exchanged) {
+          if(i < btp->dnode.ndirs) {
+            btncp = btload(btp->dp, btp->dnode.children[i + 1]);
+            if(btncp->dnode.ndirs >= BTDEGREE) {
+              if(i > 0) {
+                btrelse(btpcp);
+              }
+              btnexchange(btp, i, btcp, btncp);
+              (btp->dnode.nchildren[i])--;
+              btdelete(btcp, name, replace, 1);
+              exchanged = 1;
+            }
+          }
+        }
+        if(!exchanged) {
+          if(i > 0) {
+            if(i < btp->dnode.ndirs) {
+              btrelse(btncp);
+            }
+            btmerge(btp, i - 1, btpcp, btcp);
+            (btp->dnode.nchildren[i - 1])--;
+            btdelete(btpcp, name, replace, 1);
+          } else if(i < btp->dnode.ndirs) {
+            btmerge(btp, i, btcp, btncp);
+            (btp->dnode.nchildren[i])--;
+            btdelete(btcp, name, replace, 1);
+          } else {
+            panic("btdelete not enough children");
+          }
+        }
+      } else {
+        (btp->dnode.nchildren[i])--;
+        btdelete(btcp, name, replace, 1);
+      }
+    }
+  }
+  if(release) {
+    btwrelse(btp);
+  }
+}
+
+static 
+int btread(struct btnode *btp, char *dst, uint off, uint start, uint end)
+{
+  uint offend;
+  int i, cnt, total;
+  struct btnode *btcp;
+  uchar *src;
+
+  total = 0;
+  for(i = 0; i < btp->dnode.ndirs; i++) {
+    if(!btp->dnode.leaf) {
+      offend = off + btp->dnode.nchildren[i] * sizeof(btp->dnode.dirs[i]);
+      if(end > off && start < offend) {
+        // child overlap
+        btcp = btload(btp->dp, btp->dnode.children[i]);
+        cnt = btread(btcp, dst, off, start, end);
+        dst += cnt;
+        total += cnt;
+      }
+      off = offend;
+    }
+    offend = off + sizeof(btp->dnode.dirs[i]);
+    if(end > off && start < offend) {
+      // overlap, start copying
+      cnt = sizeof(btp->dnode.dirs[i]);
+      if(off >= start) {
+        // starting before dirent
+        src = (uchar*)&btp->dnode.dirs[i];
+      } else {
+        // starting after dirent starts
+        src = (uchar*)&btp->dnode.dirs[i] + (start - off);
+        cnt -= (start - off);
+      }
+      if (end < offend) {
+        // finishing before the end of dirent
+        cnt -= (offend - end);
+      }
+      memmove(dst, src, cnt);
+      dst += cnt;
+      total += cnt;
+    }
+    off = offend;
+  }
+  if(!btp->dnode.leaf) {
+    offend = off + btp->dnode.nchildren[i] * sizeof(btp->dnode.dirs[i]);
+    if(end > off && start < offend) {
+      // final child overlap
+      btcp = btload(btp->dp, btp->dnode.children[i]);
+      total += btread(btcp, dst, off, start, end);
+    }
+  }
+  btrelse(btp);
+
+  return total;
+}
+
+/*
+void
+dirprint(struct inode *dp)
+{
+  struct btnode *btrp;
+  
+  if(dp->addrs[0] == 0) {
+    return;
+  }
+
+  btrp = btload(dp, dp->addrs[0]);
+  btprint(btrp, 0);
+}
+*/
 
 // Write a new directory entry (name, inum) into the directory dp.
 int
 dirlink(struct inode *dp, char *name, uint inum)
 {
-  int off;
-  struct dirent de;
   struct inode *ip;
+  struct btnode *btrp, *btp, *btncp;
+  struct dirent dir;
 
   // Check that name is not present.
-  if((ip = dirlookup(dp, name, 0)) != 0){
+  if((ip = dirlookup(dp, name)) != 0){
     iput(ip);
     return -1;
   }
 
-  // Look for an empty dirent.
-  for(off = 0; off < dp->size; off += sizeof(de)){
-    if(readi(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
-      panic("dirlink read");
-    if(de.inum == 0)
-      break;
+  namecpy(dir.name, name);
+  dir.inum = inum;
+  
+  if(dp->addrs[0] == 0) {
+    // empty root
+    btrp = btalloc(dp);
+    btrp->dnode.leaf = 1;
+    dp->addrs[0] = btrp->bp->blockno;
+  } else {
+    btrp = btload(dp, dp->addrs[0]);
   }
 
-  strncpy(de.name, name, DIRSIZ);
-  de.inum = inum;
-  if(writei(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
-    panic("dirlink");
+  if(btrp->dnode.ndirs == 2 * BTDEGREE - 1) {
+    btp = btalloc(dp);
+    btp->dnode.children[0] = btrp->bp->blockno;
+    btp->dnode.nchildren[0] = btcntchildren(btrp);
+    // new root
+    dp->addrs[0] = btp->bp->blockno;
+    btncp = btsplit(btp, 0, btrp);
+    if(strncmp(name, btp->dnode.dirs[0].name, DIRSIZ) > 0) {
+      (btp->dnode.nchildren[1])++;
+      btwrelse(btrp);
+      btinsert(btncp, &dir);
+    } else {
+      (btp->dnode.nchildren[0])++;
+      btwrelse(btncp);
+      btinsert(btrp, &dir);
+    }
+    btwrelse(btp);
+  } else {
+    btinsert(btrp, &dir);
+  }
+
+  dp->size += sizeof(dir);
+  iupdate(dp);
+  
+  return 0;
+}
+
+// Look for a directory entry in a directory.
+struct inode *
+dirlookup(struct inode *ip, char *name)
+{
+  struct btnode *btrp;
+
+  if(ip->type != T_DIR) {
+    panic("dirlookup not DIR");
+  }
+  if(ip->addrs[0] == 0) {
+    return 0;
+  }
+  btrp = btload(ip, ip->addrs[0]);
+  
+  return btlookup(btrp, name);
+
+}
+
+int
+dirremove(struct inode *dp, char *name)
+{
+  // name checked for existence before calling this
+  // function
+  struct btnode *btrp;
+
+  // don't release root as it's needed below
+  btrp = btload(dp, dp->addrs[0]);
+  btdelete(btrp, name, 0, 0);
+  if(btrp->dnode.ndirs == 0) {
+    if(btrp->dnode.leaf) {
+      // no more entries
+      dp->addrs[0] = 0;
+      btfree(btrp);
+    } else {
+      // adjust root
+      dp->addrs[0] = btrp->dnode.children[0];
+      btwrelse(btrp);      
+    }
+  } else {
+     btwrelse(btrp);
+  }
+
+  dp->size -= sizeof(struct dirent);
+  iupdate(dp);
 
   return 0;
+}
+
+void
+dirread(struct inode *dp, char *dst, uint off, uint n)
+{
+  // off and n verified in range before calling this function
+  struct btnode *btrp;
+
+  if(dp->addrs[0] == 0) {
+    return;
+  }
+
+  btrp = btload(dp, dp->addrs[0]);
+  btread(btrp, dst, 0, off, off + n);
 }
 
 //PAGEBREAK!
@@ -643,7 +1220,7 @@ namex(char *path, int nameiparent, char *name)
       iunlock(ip);
       return ip;
     }
-    if((next = dirlookup(ip, name, 0)) == 0){
+    if((next = dirlookup(ip, name)) == 0){
       iunlockput(ip);
       return 0;
     }
@@ -669,3 +1246,4 @@ nameiparent(char *path, char *name)
 {
   return namex(path, 1, name);
 }
+

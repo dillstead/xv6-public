@@ -47,3 +47,60 @@ will need to install a cross-compiler gcc suite capable of producing
 x86 ELF binaries. See http://pdos.csail.mit.edu/6.828/2016/tools.html.
 Then run "make TOOLPREFIX=i386-jos-elf-". Now install the QEMU PC
 simulator and run "make qemu".
+
+
+Enchancements
+    
+B tree directory entries
+    - Directory inodes use addrs[0] to refer to the root node in a
+      B tree.
+
+    B tree node
+
+        - Block size (512 bytes)
+        - Contains the number of directory entries in the node, a list
+          of directory entries, a list of child blocks, a list of
+          the total number of children per child, and a field
+          designating whether or not the node is a leaf
+        - The minimum degree of the B tree is 11 indicating that each
+          node other than the root must have at least 10 and at most
+          21 directory entries and at most 22 children.
+        - To conserve stack space, nodes are cached in the same
+          fashion as blocks
+        - Nodes also follow a similar pardigm for allocating, reading,
+          writing, releasing, and freeing as block do
+        - The maximum number of characters in a directory entry has
+          been increased to 16
+        - Directory entries are stored and read in alphabetical order
+     
+
+    Algorithms
+        - Inserting, deleting, and searching for a node
+          are adopted from Chapter 18 of Introduction to Algorithms
+          by Cormen, Leiserson, Rivest, and Stein
+        - The algorithm for reading supports random access by using the
+          total number of children per child, the start and end of the range
+          of bytes requested by the caller, and the fact that a
+          directory entry is the smallest unit that can be
+          read/written to efficiently "guide" the read to the
+          appropriate locations
+
+    Design goals
+        - A node can be read (and written) once per insert, delete,
+          etc.
+        - At most, height number of nodes can be cached at any one
+    time
+
+    Known issues
+        - Since the directory entries are stored in alphabetical order
+          (as opposed to a list), it's possible for directories to
+          precede "." and ".." when reading all the diretories entries
+          from a directory.
+        - Directory inodes have unused addrs aside from addrs[0]
+
+    Future enhancements
+        - Use B+ trees instead of B trees
+    
+    
+    
+    

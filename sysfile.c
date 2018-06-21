@@ -185,9 +185,7 @@ int
 sys_unlink(void)
 {
   struct inode *ip, *dp;
-  struct dirent de;
   char name[DIRSIZ], *path;
-  uint off;
 
   if(argstr(0, &path) < 0)
     return -1;
@@ -204,7 +202,7 @@ sys_unlink(void)
   if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
     goto bad;
 
-  if((ip = dirlookup(dp, name, &off)) == 0)
+  if((ip = dirlookup(dp, name)) == 0)
     goto bad;
   ilock(ip);
 
@@ -215,9 +213,8 @@ sys_unlink(void)
     goto bad;
   }
 
-  memset(&de, 0, sizeof(de));
-  if(writei(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
-    panic("unlink: writei");
+  if (dirremove(dp, name) < 0)
+    panic("unlink: dirremove");
   if(ip->type == T_DIR){
     dp->nlink--;
     iupdate(dp);
@@ -241,7 +238,6 @@ bad:
 static struct inode*
 create(char *path, short type, short major, short minor)
 {
-  uint off;
   struct inode *ip, *dp;
   char name[DIRSIZ];
 
@@ -249,7 +245,7 @@ create(char *path, short type, short major, short minor)
     return 0;
   ilock(dp);
 
-  if((ip = dirlookup(dp, name, &off)) != 0){
+  if((ip = dirlookup(dp, name)) != 0){
     iunlockput(dp);
     ilock(ip);
     if(type == T_FILE && ip->type == T_FILE)

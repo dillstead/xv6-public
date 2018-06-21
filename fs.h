@@ -48,10 +48,24 @@ struct dinode {
 #define BBLOCK(b, sb) (b/BPB + sb.bmapstart)
 
 // Directory is a file containing a sequence of dirent structures.
-#define DIRSIZ 14
+#define DIRSIZ 16
 
 struct dirent {
   ushort inum;
   char name[DIRSIZ];
+};
+
+// Directory entries per B-tree node
+#define NDIRENT 21
+
+// Degree of B-tree
+#define BTDEGREE 11
+
+struct dirnode {
+  uchar leaf;
+  uchar ndirs;
+  struct dirent dirs[NDIRENT];
+  uint children[NDIRENT + 1];
+  ushort nchildren[NDIRENT + 1];
 };
 

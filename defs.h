@@ -36,8 +36,11 @@ int             filewrite(struct file*, char*, int n);
 
 // fs.c
 void            readsb(int dev, struct superblock *sb);
-int             dirlink(struct inode*, char*, uint);
-struct inode*   dirlookup(struct inode*, char*, uint*);
+int             dirlink(struct inode *dp, char *name, uint inum);
+struct inode *  dirlookup(struct inode *ip, char *name);
+int             dirremove(struct inode *dp, char *name);
+void            dirread(struct inode *dp, char *dst, uint off, uint n);
+/*void            dirprint(struct inode *dp);*/
 struct inode*   ialloc(uint, short);
 struct inode*   idup(struct inode*);
 void            iinit(int dev);

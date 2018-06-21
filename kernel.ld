@@ -3,14 +3,18 @@
 
 OUTPUT_FORMAT("elf32-i386", "elf32-i386", "elf32-i386")
 OUTPUT_ARCH(i386)
+/* The first executable instruction in an output file, can be overridden
+   by -e command line option. _start is defined in entry.S. */
 ENTRY(_start)
 
 SECTIONS
 {
 	/* Link the kernel at this address: "." means the current address */
         /* Must be equal to KERNLINK */
+        /* Relocation address */
 	. = 0x80100000;
 
+        /* Load address */
 	.text : AT(0x100000) {
 		*(.text .stub .text.* .gnu.linkonce.t.*)
 	}
