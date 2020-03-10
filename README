@@ -49,7 +49,7 @@ Then run "make TOOLPREFIX=i386-jos-elf-". Now install the QEMU PC
 simulator and run "make qemu".
 
 
-Enchancements
+Enhancements
     
 B tree directory entries
     - Directory inodes use addrs[0] to refer to the root node in a
